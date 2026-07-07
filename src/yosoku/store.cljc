@@ -1,0 +1,132 @@
+(ns yosoku.store
+  "SSoT for the yosoku actor, behind a `Store` protocol so the backend is a
+  swap, not a rewrite:
+
+    - `MemStore`     — atom of Datomic-shaped EDN. The deterministic default
+                       for dev/tests/demo (no deps).
+    - `DatomicStore` — backed by `langchain.db`, a Datomic-API-compatible EAV
+                       store (datalog q / pull / ref attrs / upsert). Pure
+                       `.cljc`, so it runs offline AND can be pointed at a
+                       real Datomic Local or a kotoba-server pod by swapping
+                       `langchain.db`'s `:db-api` (see langchain.kotoba-db).
+
+  Both implement the same protocol and pass the same contract
+  (test/yosoku/store_contract_test.clj), which is the whole point: the
+  ScenarioActor, the ScenarioGovernor and the audit ledger never know which
+  SSoT they run on.
+
+  A registered model is stored WHOLE (as a single opaque value keyed by
+  model-id) rather than exploded into a per-variable entity graph — a
+  scenario patch/replace is a whole-model swap from the SSoT's point of view
+  (the append-only ledger, not a versioned entity graph, is what carries the
+  audit trail of what changed and why). On DatomicStore the whole model
+  round-trips as an EDN string attribute (the same `pr-str`/`edn/read-string`
+  convention gftd-talent-actor's store uses for its `:protected` maps and
+  ledger facts) since a model's `:xmile/variables` map/`:xmile/inflows` sets
+  aren't something this actor needs to query at the Datomic attribute level."
+  (:require #?(:clj  [clojure.edn :as edn]
+               :cljs [cljs.reader :as edn])
+            [langchain.db :as d]
+            [yosoku.models :as models]
+            [yosoku.scenario :as scenario]))
+
+(def ^:private demo-model-id "community-growth")
+
+(defprotocol Store
+  (model-of [s model-id] "the currently-registered model for model-id, or nil")
+  (all-model-ids [s])
+  (ledger [s])
+  (commit-record! [s record]
+    "apply a committed op's record ({:effect :register-model|:apply-scenario
+    :model-id id :model m :patch p}) to the SSoT")
+  (append-ledger! [s fact] "append one immutable decision fact")
+  (with-model [s model-id model] "seed/replace a model; nil id/model is a no-op"))
+
+;; ───────────────────────── MemStore (default) ─────────────────────────
+
+(defrecord MemStore [a]
+  Store
+  (model-of [_ id] (get-in @a [:models id]))
+  (all-model-ids [_] (sort (keys (:models @a))))
+  (ledger [_] (:ledger @a))
+  (commit-record! [s {:keys [effect model-id model patch]}]
+    (case effect
+      :register-model (swap! a assoc-in [:models model-id] model)
+      :apply-scenario (swap! a update-in [:models model-id]
+                             (fn [base] (scenario/apply-patch base patch)))
+      nil)
+    s)
+  (append-ledger! [_ fact] (swap! a update :ledger conj fact) fact)
+  (with-model [s id model]
+    (when (and id model) (swap! a assoc-in [:models id] model))
+    s))
+
+(defn mem-store
+  "An empty MemStore, or one seeded with `seed` ({id -> xmile-model})."
+  ([] (mem-store {}))
+  ([seed] (->MemStore (atom {:models seed :ledger []}))))
+
+(defn seed-db
+  "A MemStore pre-seeded with the demo `community-growth` model — the
+  deterministic default for dev/tests/demo."
+  []
+  (mem-store {demo-model-id (models/community-growth)}))
+
+;; ───────────────────────── DatomicStore (langchain.db) ─────────────────────────
+
+(def ^:private schema
+  "DataScript/Datomic-style schema: only constraint attrs are declared. The
+  model itself and every ledger fact are stored as EDN strings so
+  `langchain.db` doesn't expand them into sub-entities (same convention as
+  gftd-talent-actor's DatomicStore)."
+  {:model/id   {:db/unique :db.unique/identity}
+   :ledger/seq {:db/unique :db.unique/identity}})
+
+(defn- enc [v] (pr-str v))
+(defn- dec* [s] (when s (edn/read-string s)))
+
+(defrecord DatomicStore [conn]
+  Store
+  (model-of [_ id]
+    (some-> (d/pull (d/db conn) [:model/edn] [:model/id id]) :model/edn dec*))
+  (all-model-ids [_]
+    (sort (d/q '[:find [?id ...] :where [?e :model/id ?id]] (d/db conn))))
+  (ledger [_]
+    (->> (d/q '[:find ?s ?f :where [?e :ledger/seq ?s] [?e :ledger/fact ?f]] (d/db conn))
+         (sort-by first)
+         (mapv (comp dec* second))))
+  (commit-record! [s {:keys [effect model-id model patch]}]
+    (case effect
+      :register-model (d/transact! conn [{:model/id model-id :model/edn (enc model)}])
+      :apply-scenario
+      (let [next (scenario/apply-patch (model-of s model-id) patch)]
+        (d/transact! conn [{:model/id model-id :model/edn (enc next)}]))
+      nil)
+    s)
+  (append-ledger! [s fact]
+    (d/transact! conn [{:ledger/seq (count (ledger s)) :ledger/fact (enc fact)}])
+    fact)
+  (with-model [s id model]
+    (when (and id model) (d/transact! conn [{:model/id id :model/edn (enc model)}]))
+    s))
+
+(defn datomic-store
+  "A DatomicStore (langchain.db backend) seeded from `seed` ({id ->
+  xmile-model}); empty when omitted."
+  ([] (datomic-store {}))
+  ([seed]
+   (let [s (->DatomicStore (d/create-conn schema))]
+     (reduce (fn [st [id model]] (with-model st id model)) s seed))))
+
+(defn datomic-seed-db
+  "A DatomicStore seeded with the demo `community-growth` model — the
+  Datomic-backed analog of `seed-db`, used to prove protocol parity."
+  []
+  (datomic-store {demo-model-id (models/community-growth)}))
+
+;; ───────────────────────── ledger formatting ─────────────────────────
+
+(defn ledger-line
+  "Human-readable one-liner for a ledger fact (used by the demo)."
+  [{:keys [op model-id disposition basis]}]
+  (str (name disposition) " · op=" op " · model=" model-id " · basis=" (pr-str basis)))
