@@ -1,0 +1,80 @@
+(ns yosoku.deploy
+  "Deploy entrypoint — wires a REAL Murakumo-fleet LLM (langchain.model
+  OpenAI-compatible against the local Ollama, gemma-4-E4B) into the SD-Advisor
+  and runs ONE `:scenario/advise` proposal against `etzhayyim-substrate-
+  rollout` end to end (advise -> ScenarioGovernor -> commit/hold/escalate).
+
+  Same shape as `tashikame.deploy`/`kouhou.deploy`: this only proves the
+  real-LLM -> governor path against the live Murakumo model. yosoku has no
+  publish rail (it is a simulation actor, not a publisher) — a committed
+  proposal here writes the in-process MemStore + audit ledger, nothing
+  external.
+
+  Usage: clojure -M:dev -m yosoku.deploy \"<intent>\" [model-id]
+  Env:   YOSOKU_OLLAMA_URL (default http://127.0.0.1:11434)
+         YOSOKU_OLLAMA_MODEL (default gemma-4-E4B qat)"
+  (:require [clojure.data.json :as json]
+            [clojure.string :as str]
+            [langchain.model :as model]
+            [langgraph.graph :as g]
+            [yosoku.advisor :as advisor]
+            [yosoku.models :as models]
+            [yosoku.store :as store]
+            [yosoku.operation :as op])
+  (:import [java.net URI]
+           [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
+            HttpResponse$BodyHandlers])
+  (:gen-class))
+
+(def ^:private default-ollama-url
+  (or (System/getenv "YOSOKU_OLLAMA_URL") "http://127.0.0.1:11434"))
+
+(def ^:private default-ollama-model
+  (or (System/getenv "YOSOKU_OLLAMA_MODEL")
+      "hf.co/unsloth/gemma-4-E4B-it-qat-GGUF:UD-Q4_K_XL"))
+
+(defn jvm-http-fn
+  "langchain.model :http-fn backed by the JDK HTTP client (no dependency)."
+  [{:keys [url method headers body]}]
+  (let [b (HttpRequest/newBuilder (URI/create url))]
+    (doseq [[k v] headers] (.header b k v))
+    (let [req  (-> b (.method (str/upper-case (name (or method :post)))
+                             (if body
+                               (HttpRequest$BodyPublishers/ofString body)
+                               (HttpRequest$BodyPublishers/noBody)))
+                   (.build))
+          resp (.send (HttpClient/newHttpClient) req (HttpResponse$BodyHandlers/ofString))]
+      {:status (.statusCode resp) :body (.body resp)})))
+
+(defn ollama-chat-model
+  "Build a langchain.model/openai-model against a Murakumo-fleet Ollama.
+  Refuses non-Murakumo hosts (Rider v3.3 §2(i))."
+  ([]
+   (ollama-chat-model default-ollama-url default-ollama-model))
+  ([ollama-url ollama-model]
+   (advisor/assert-murakumo! ollama-url)
+   (model/openai-model
+    {:url        (str ollama-url "/v1/chat/completions")
+     :model      ollama-model
+     :api-key    nil
+     :http-fn    jvm-http-fn
+     :json-write json/write-str
+     :json-read  #(json/read-str % :key-fn keyword)})))
+
+(defn -main
+  [& args]
+  (let [[intent model-id] (if (seq args) args
+                               ["cautiously widen mimamori consent coverage"
+                                "etzhayyim-substrate-rollout"])
+        chat  (ollama-chat-model)
+        adv   (advisor/llm-advisor chat {:max-tokens 256})
+        s     (store/mem-store {model-id (models/etzhayyim-substrate-rollout)})
+        actor (op/build s {:advisor adv})
+        tid   "deploy-1"
+        req   {:op :scenario/advise :model-id model-id :intent intent}
+        r     (g/run* actor {:request req :context {:actor-id "yosoku"}} {:thread-id tid})]
+    (println "=== yosoku deploy (real LLM @ Murakumo) ===")
+    (println "model-id   :" model-id)
+    (println "intent     :" intent)
+    (println "disposition:" (get-in r [:state :disposition]))
+    (println "ledger tail:" (pr-str (last (store/ledger s))))))
