@@ -54,6 +54,17 @@
     (is (:escalate? v))
     (is (= [:parameter-bound] (map :rule (:violations v))))))
 
+(deftest zero-old-value-parameter-bound-does-not-crash
+  (testing "old-val exactly 0 -> nonzero is an infinite relative change (##Inf);
+            regression for a crash where (int ##Inf) threw
+            IllegalArgumentException instead of escalating"
+    (let [zero-base (assoc-in base [:xmile/variables "GrowthRate" :xmile/eqn] "0")
+          v (governor/check {:op :scenario/propose} ctx (scenario "GrowthRate" "0.07") zero-base)]
+      (is (not (:hard? v)))
+      (is (:escalate? v))
+      (is (= [:parameter-bound] (map :rule (:violations v))))
+      (is (re-find #"∞" (:detail (first (:violations v))))))))
+
 (deftest implausible-output-escalates-not-holds
   (testing "a brand-new model (no patch, so parameter-bound cannot apply) whose
             own initial value is already absurd — implausible-output is
