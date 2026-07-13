@@ -4,7 +4,8 @@
   model (distinct from the three governor-contract fixtures, which have no
   dedicated test namespace of their own since they're already exercised
   end-to-end by governor_test/advisor_test/scenario_test)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [xmile.validate :as validate]
             [xmile.execute :as execute]
             [yosoku.models :as models]
@@ -48,3 +49,22 @@
                           model)]
     (is (:hard? v))
     (is (some #{:protected-variable} (map :rule (:violations v))))))
+
+(deftest dispute-resolution-coverage-is-never-wired-to-robotics-units
+  (testing "DisputeResolutionCoverage's own equation, and every equation that
+            references RoboticsUnits, must not mention the other — the model
+            intentionally keeps 'transparency/adjudication capacity' and
+            'physical/robotics capacity' structurally disjoint"
+    (let [dispute-eqn (get-in model [:xmile/variables "AdjudicationExpansion" :xmile/eqn])
+          fleet-eqn (get-in model [:xmile/variables "FleetDeployment" :xmile/eqn])]
+      (is (not (str/includes? dispute-eqn "RoboticsUnits")))
+      (is (not (str/includes? fleet-eqn "DisputeResolutionCoverage"))))))
+
+(deftest land-trust-gates-physical-delivery-stocks
+  (testing "LandTrustCoverage is a real dependency of both physical-delivery
+            stocks (facilities are a prerequisite for care delivery and fleet
+            depots alike)"
+    (is (str/includes?
+         (get-in model [:xmile/variables "CoverageExpansion" :xmile/eqn]) "LandTrustCoverage"))
+    (is (str/includes?
+         (get-in model [:xmile/variables "FleetDeployment" :xmile/eqn]) "LandTrustCoverage"))))
