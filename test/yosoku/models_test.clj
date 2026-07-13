@@ -1,0 +1,50 @@
+(ns yosoku.models-test
+  "Structural + governed-scenario smoke tests for
+  `yosoku.models/etzhayyim-substrate-rollout` — the real deployment scenario
+  model (distinct from the three governor-contract fixtures, which have no
+  dedicated test namespace of their own since they're already exercised
+  end-to-end by governor_test/advisor_test/scenario_test)."
+  (:require [clojure.test :refer [deftest is testing]]
+            [xmile.validate :as validate]
+            [xmile.execute :as execute]
+            [yosoku.models :as models]
+            [yosoku.governor :as governor]))
+
+(def model (models/etzhayyim-substrate-rollout))
+
+(deftest structurally-valid
+  (let [problems (validate/validate model)]
+    (is (= [] (validate/errors problems)))
+    (is (= [] (validate/warnings problems)))))
+
+(deftest baseline-run-is-finite-and-monotone-non-negative
+  (testing "every stock stays finite and non-negative over the 60-tick horizon;
+            RoboticsUnits stays at 0 since DispatchGate starts at 0.0 (S0 —
+            no robots dispatched — matches the documented current state)"
+    (let [{:keys [xmile/series]} (execute/run model)]
+      (doseq [[nm vs] series]
+        (doseq [v vs] (is (and (number? v) (>= v 0.0)) (str nm " went negative/non-finite"))))
+      (is (= 0.0 (last (get series "RoboticsUnits")))))))
+
+(deftest opening-a-gate-escalates-and-commits
+  (testing "flipping a 0-valued gate (DispatchGate) to a materially higher
+            value is an infinite relative change -> :parameter-bound
+            escalation, not a hard hold (regression coverage for the
+            zero-old-value formatting fix in yosoku.governor)"
+    (let [v (governor/check {:op :scenario/propose} {:actor-id "t"}
+                            {:effect :apply-scenario :model-id "etzhayyim-substrate-rollout"
+                             :patch {:variables {"DispatchGate" {:xmile/eqn "0.9"}}}
+                             :confidence 0.8}
+                            model)]
+      (is (not (:hard? v)))
+      (is (:escalate? v))
+      (is (= [:parameter-bound] (map :rule (:violations v)))))))
+
+(deftest compliance-floor-is-protected-on-this-model-too
+  (let [v (governor/check {:op :scenario/propose} {:actor-id "t"}
+                          {:effect :apply-scenario :model-id "etzhayyim-substrate-rollout"
+                           :patch {:variables {"ComplianceFloor" {:xmile/eqn "0"}}}
+                           :confidence 0.9}
+                          model)]
+    (is (:hard? v))
+    (is (some #{:protected-variable} (map :rule (:violations v))))))

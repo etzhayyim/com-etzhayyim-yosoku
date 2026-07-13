@@ -112,6 +112,18 @@
     (if (zero? new) 0.0 ##Inf)
     (/ (abs* (- new old)) (abs* old))))
 
+(defn- infinite?* [x]
+  #?(:clj (Double/isInfinite (double x)) :cljs (not (js/isFinite x))))
+
+(defn- pct-str
+  "Human-readable percentage for a relative-change ratio. `(int ...)` throws
+  on `##Inf` (old-val was exactly 0, e.g. a gate at rest going from 0 to any
+  nonzero value is an infinite relative change) — this is a real, reachable
+  case (any 0-initialized aux/parameter), not just a theoretical edge, so it
+  must render rather than crash the governor."
+  [rel]
+  (if (infinite?* rel) "∞" (str (int (* 100 rel)))))
+
 (defn- parameter-bound-violations [base-model patch]
   (keep
    (fn [[nm override]]
@@ -121,7 +133,7 @@
            (when (> rel parameter-bound)
              {:rule :parameter-bound
               :detail (str nm ": " old-val " -> " new-val
-                           " (" (int (* 100 rel)) "% change, bound is "
+                           " (" (pct-str rel) "% change, bound is "
                            (int (* 100 parameter-bound)) "%)")})))))
    (:variables patch)))
 
