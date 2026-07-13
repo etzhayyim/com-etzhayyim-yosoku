@@ -67,7 +67,11 @@
                                ["cautiously widen mimamori consent coverage"
                                 "etzhayyim-substrate-rollout"])
         chat  (ollama-chat-model)
-        adv   (advisor/llm-advisor chat {:max-tokens 256})
+        ;; 256 is too tight for a "thinking" model (gemma4:e4b-it-qat emits a
+        ;; separate :reasoning field before :content and can burn the whole
+        ;; budget there, leaving :content empty -- verified live 2026-07-13
+        ;; against the com-junkawasaki tailnet fleet).
+        adv   (advisor/llm-advisor chat {:max-tokens 1024})
         s     (store/mem-store {model-id (models/etzhayyim-substrate-rollout)})
         actor (op/build s {:advisor adv})
         tid   "deploy-1"
