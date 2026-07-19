@@ -10,7 +10,7 @@
  ;; (no sibling checkout needed; a plain git dependency, resolved over
  ;; network like org-oasis-open-xmile's own dsl-core dep).
  :deps {io.github.com-junkawasaki/langgraph-clj
-        {:local/root "../../com-junkawasaki/langgraph-clj"}
+        {:local/root "../../kotoba-lang/langgraph"}
         io.github.kotoba-lang/org-oasis-open-xmile
         {:git/sha "3930c70b52611dee6aa75910b02010e1cb657c6f"}
         org.clojure/data.json {:mvn/version "2.5.1"}} ; yosoku.deploy real-LLM json (same as tashikame/kouhou)
@@ -18,7 +18,7 @@
  {;; offline workspace dev — pin transitive langchain-clj to local checkout
   :dev {:override-deps
         {io.github.com-junkawasaki/langchain-clj
-         {:local/root "../../com-junkawasaki/langchain-clj"}}}
+         {:local/root "../../kotoba-lang/langchain"}}}
   ;; clojure -M:dev:run  → drive the demo scenarios through one ScenarioActor
   :run {:main-opts ["-m" "yosoku.sim"]}
   :test {:extra-paths ["test"]
